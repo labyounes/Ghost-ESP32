@@ -74,7 +74,7 @@ idf.py -p COM3 monitor
 
 Once Ghost boots the scan runs automatically and you will see the networks printed in real time:
 
-![Monitor output](Boot_Ghost_.png)
+![Monitor output](Boot_Ghost.png)
 
 Press **Strg+]** to exit the monitor.
 
