@@ -42,10 +42,6 @@ cd ghost
 idf.py set-target esp32
 ```
 
-Replace `main/ghost.c` with the Ghost firmware source code.
-
----
-
 ## Build & Flash
 
 ### Build
