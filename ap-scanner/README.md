@@ -150,8 +150,7 @@ Baud rate:       115200
 
 - [x] UART communication
 - [x] WiFi AP scanning
-- [ ] Probe request sniffing
-- [ ] Beacon spam
+
 
 ---
 
