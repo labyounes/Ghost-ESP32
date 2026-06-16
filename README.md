@@ -12,6 +12,7 @@ Each module is a standalone ESP-IDF project with its own build system, Python co
 |---|---|
 | [`ap-scanner/`](ap-scanner/) | Scan nearby WiFi access points over UART |
 | [`deauth-attack/`](deauth-attack/) | Send forged deauth frames to disconnect clients from a target network |
+| [`evil-twin/`](evil-twin/) | Clone a real network and serve a captive portal to capture credentials |
 
 ---
 
