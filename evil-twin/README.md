@@ -1,19 +1,23 @@
-# Ghost — Evil Twin Module (Step 1: Fake AP)
+# Ghost — Evil Twin Module
 
-Standalone ESP32 module that creates a fake WiFi access point with any SSID you choose. This is the foundation of the Evil Twin attack — built and verified step by step.
+Standalone ESP32 module that clones a real WiFi network, deauthenticates clients from it, and traps them on a fake AP with DNS poisoning. Built step by step on top of ESP-IDF.
 
 > **For authorized security testing and educational use only.**
 
 ---
 
-## Current step: Fake AP
+## What it does
 
-The ESP32 broadcasts an open WiFi network with whatever name you send over UART. Devices nearby will see it and can connect to it. The ESP32 reports every client that joins or leaves over UART.
+When you send `CMD:TWIN_START:<ssid>`:
 
-### What's coming next (built on top of this)
-- **Step 2:** DNS server — redirects all domain lookups to the ESP32
-- **Step 3:** Captive portal — fake login page served to connected clients
-- **Step 4:** Deauth integration — knock clients off the real network so they reconnect to ours
+1. ESP32 scans for the target network and grabs its BSSID and channel
+2. Starts a fake AP with the exact same SSID on the exact same channel
+3. Starts a DNS server — every domain query from connected clients resolves to the ESP32
+4. Starts sending deauth frames to the real router — clients get kicked off and auto-reconnect to the fake AP
+
+### What's coming next
+- **Step 3:** HTTP captive portal — fake login page served automatically to connected clients
+- **Step 5:** Deauth loop — re-deauth clients the moment they try to escape back to the real network
 
 ---
 
@@ -57,10 +61,17 @@ idf.py -p COM3 flash
 python Twin.py
 ```
 
-The script asks for an SSID, sends it to the ESP32, and streams connection events to the console. Press **Ctrl+C** to bring the AP down.
+The script asks for an SSID, sends it to the ESP32, and streams all events to the console. Press **Ctrl+C** to stop everything cleanly.
 
-### Verify it works
-After running the script, open WiFi on your phone — the network should appear immediately. When you connect, the terminal will print `TWIN:CLIENT_JOINED:<mac>`.
+### What you'll see
+```
+TWIN:SCANNING_FOR:HomeNetwork
+TWIN:TARGET_FOUND BSSID=AA:BB:CC:DD:EE:FF CH=6
+TWIN:AP_STARTED:HomeNetwork
+DNS:STARTED
+DEAUTH:STARTED BSSID=AA:BB:CC:DD:EE:FF CH=6
+TWIN:CLIENT_JOINED:11:22:33:44:55:66
+```
 
 ---
 
@@ -68,25 +79,28 @@ After running the script, open WiFi on your phone — the network should appear 
 
 | Command | Description |
 |---|---|
-| `CMD:TWIN_START:<ssid>` | Start fake AP with the given SSID |
-| `CMD:TWIN_STOP` | Stop the AP |
+| `CMD:TWIN_START:<ssid>` | Scan, clone, deauth and trap clients from the given network |
+| `CMD:TWIN_STOP` | Stop everything — AP, DNS, deauth |
 
 | Response | Description |
 |---|---|
 | `GHOST:READY` | Firmware booted |
-| `TWIN:AP_STARTED:<ssid>` | AP is live |
-| `TWIN:CLIENT_JOINED:<mac>` | A device connected |
+| `TWIN:SCANNING_FOR:<ssid>` | Looking up target network |
+| `TWIN:TARGET_FOUND BSSID=... CH=...` | Target located |
+| `TWIN:AP_STARTED:<ssid>` | Fake AP is live |
+| `DNS:STARTED` | DNS server running |
+| `DEAUTH:STARTED BSSID=... CH=...` | Deauth attack running |
+| `TWIN:CLIENT_JOINED:<mac>` | A device connected to the fake AP |
 | `TWIN:CLIENT_LEFT:<mac>` | A device disconnected |
-| `TWIN:AP_STOPPED` | AP shut down |
+| `DEAUTH:STOPPED` | Deauth stopped |
+| `DNS:STOPPED` | DNS stopped |
+| `TWIN:AP_STOPPED` | Everything shut down |
+| `ERR:SSID_NOT_FOUND:<ssid>` | Target network not visible |
 | `ERR:NO_SSID` | No SSID provided in command |
 | `ERR:UNKNOWN` | Unrecognized command |
 
 ---
 
-## UART Pinout
+## Communication
 
-| Signal | GPIO | Physical pin (NodeMCU) |
-|---|---|---|
-| TX | GPIO17 | TX0 |
-| RX | GPIO16 | RX0 |
-| Baud rate | — | 115200 |
+All communication runs over USB — no external wiring needed. See the root README for details on the UART pinout if extending this project for use with external hardware.
