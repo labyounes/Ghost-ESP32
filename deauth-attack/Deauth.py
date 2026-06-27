@@ -6,7 +6,14 @@ PORT      = 'COM3'
 BAUD_RATE = 115200
 
 def open_serial():
-    return serial.Serial(PORT, BAUD_RATE, timeout=5)
+    s = serial.Serial()
+    s.port = PORT
+    s.baudrate = BAUD_RATE
+    s.timeout = 5
+    s.dtr = False
+    s.rts = False
+    s.open()
+    return s
 
 def wait_ready(s):
     print("Waiting for Ghost to boot...")

